@@ -1,0 +1,429 @@
+---
+title: "Gene expression patterns of breast carcinomas distinguish tumor subclasses"
+author: "Juan Manuel Vega Arias"
+date: '`r format(Sys.Date(),"%e de %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    css: Pec2.css
+    keep_md: true
+    toc_float: true
+  pdf_document:
+    toc: true
+    toc_depth: 3
+bibliography: Pec2.bib
+link-citations: yes
+---
+
+```{r libraries, include=FALSE}
+library("class")
+library("knitr")
+library("neuralnet")
+library("kernlab")
+library("NeuralNetTools")
+library("nnet")
+library("caret")
+library("e1071")
+library("kableExtra")
+```
+
+# Gene expression patterns of breast carcinomas distinguish tumor subclasses.
+
+En esta actividad vamos a realizar un informe que analiza un caso basado en los datos del artículo:
+
+**Gene expression patterns of breast carcinomas distinguish tumor subclasses with clinical im- plications. Sorlie et al. Proceedings of the National Academy of Sciences 98 (septiembre): 10869-74
+El propósito de este artículo fue clasificar los carcinomas de mama basados en las variaciones en los patrones de expresión génica obtenidos de microarrays de cDNA y correlacionar las características del tumor con el resultado clínico**. [@Sorlie10869].
+
+Se estudian 5 tipos de cánceres:
+
+1: basal-like (14 observaciones)
+
+2: ERBB2+ (11 observaciones)
+
+3: Normal (13 observaciones)
+
+4: Luminal B/C (15 observaciones)
+
+5: Luminal A (32 observaciones)
+
+Nos basaremos en los análisis del capítulo 7 del libro Machine Learning With R "Black Box Methods – Neural Networks and Support Vector Machines" [@Lantz2015MLR2876101].
+
+En esta actividad se usan los datos del artículo para implementar el algoritmo de red neuronal artificial (ANN) y el “support vector machine” (SVM) para predecir los cinco tipos de cánceres.
+
+# Algoritmo Red Neuronal Artificial
+
+Las redes neuronales artificiales fueron diseñadas como modelos computacionales de neuronas humanas y al igual que el cerebro se compone de las neuronas, las redes neuronales se componen de unos nodos, que funcionan conectados unos a otros formando una red de capas estratificadas, esta red de nodos trabaja conjuntamente para estimar un modelo que se ajuste a un problema, normalmente no lineal, con el mínimo error posible.
+
+Tenemos varios puntos principales que caracterizan una red neuronal:
+
+**La estructura**.
+Las redes neuronales se estructuran por capas en forma de una columna de nodos. La primera capa es la **Capa de Input**, seguida de las **Capas Intermedias**, a partir de la segunda capa, son las llamadas **Capas Ocultas** (Hidden Layers) y la última, es la **Capa de Output**. Aunque siempre tendremos una Capa de Input y una Capa de Output, puede haber más de una Capa Oculta.
+
+**La funcion de activación**
+Cada nodo tiene una función de activación. Esta es la responsable de calcular los valores de output del nodo basados en los valores de input. Normalmente con esta conseguimos transformar el modelo de lineal a no lineal. este output será a su vez input de los nodos a los que esté conectado.
+
+**El método de entrenamiento**
+Al dar un valor predecido en la capa de output, este se compara con el set de entrenamiento para saber cuánto nos hemos equivocado en nuestra predicción. Gracias al algoritmo de **backpropagation** se realizan pequeños cambios en los pesos de los valores de input para hacer coincidir la predicción con el output.
+
+
+Gracias a esto las redes neuronales pueden ajustar sus predicciones a patrones no lineales que son a la vez más complejos y más parecidos a los que se dan en condiciones naturales. Dicha capacidad para extraer patrones complejos está directamente relacionada con el número de capas que formen el modelo.
+
+| **Fortalezas**    | **Debilidades**  | 
+| ------------------------------------ |:------------------------------------|
+| • Adaptable a clasificación o problemas de predicción numérica | • Requiere de gran potencia computacional y en general es de aprendizaje lento, particularmente si la topología es compleja |
+| • Capaz de modelar patrones más complejos que casi cualquier otro algoritmo | • Propenso a sobreajustar los datos de entrenamiento |
+| • No necesita muchas restricciones acerca de las relaciones subyacentes de los datos | • Es un modelo de caja negra complejo que es difícil, si no imposible, de interpretar
+
+
+## Paso 1 - recolección de datos
+
+El análisis de componentes principales (PCA, en inglés) es una técnica básica y muy utilizada en análisis multivariante para reducir el número de variables creando nuevas variables como combinación lineal de las originales buscando máximizar la varianza explicada. Usaremos el archivo fruto de un PCA a los datos brutos del artículo, “pcaComponents2.csv”.
+
+```{r}
+pca <- read.csv("pcaComponents2.csv")
+clases <- read.csv("class2.csv")
+dim(pca)
+dim(clases)
+```
+
+Lo primero que podemos ver en los dos conjuntos de datos es que el resultado del PCA tiene `r nrow(pca)` observaciones y `r ncol(pca)` variables de las cuales tendremos que elegir las 10
+primeras variables que son las que representan más variabilidad entre los datos.
+El segundo conjunto son las clases de cáncer representados por numeros del 1 al 5 y tiene `r nrow(clases)` observaciones como cabe esperar.
+
+```{r}
+pca <- pca[,1:10]
+```
+
+## Paso 2 - exploración y preparación de datos
+
+Echamos un primer vistazo al set de datos con la función `summary()` y vemos que lo primero que necesitamos es normalizar los datos.
+
+```{r}
+summary(pca)
+```
+
+Para ello vamos a crear una función a la que llamaremos `normalizar()` y utilizaremos la función `lapply()` para transformar todos los registros de nuestro set de datos. 
+
+```{r}
+normalizar <- function(x) {
+return((x - min(x)) / (max(x) - min(x)))
+}
+pca_norm <- as.data.frame(lapply(pca, normalizar))
+```
+
+
+Volvemos a ver el resumen de las variables con `summary()` y comprobamos que están todas normalizadas.
+
+```{r}
+summary(pca_norm)
+```
+
+**Utilizando la semilla aleatoria 12345, mezclamos las filas.**
+
+```{r}
+set.seed(12345)
+shuffle <- sample(nrow(pca_norm),nrow(pca_norm))
+pca_norm <- pca_norm[shuffle,]
+clases <- clases[shuffle,]
+```
+
+Creamos un factor con 5 etiquetas, "BASLIK", "ERBB", "NORM", "LUM_BC" y "LUM_A", cada una para un tipo de cáncer, para una mejor intuición de los datos de clase de tumor y como la función `neuralnet()` no admite variables factor o categóricas, hay que transformar la variable de tipo de cáncer "`x`" a binaria, "VERDADERO" cuando pertenezaca a dicha clase y "FALSO" en caso contrario.
+
+```{r}
+xclases <- factor(clases, levels=c(1,2,3,4,5), labels=c("BASLIK", "ERBB", "NORM", "LUM_BC", "LUM_A"))
+table(xclases)
+
+pca_completa <- pca_norm
+pca_completa$BASLIK <- xclases== "BASLIK"
+pca_completa$ERBB <- xclases == "ERBB"
+pca_completa$NORM <- xclases == "NORM"
+pca_completa$LUM_BC <- xclases == "LUM_BC"
+pca_completa$LUM_A <- xclases == "LUM_A"
+```
+
+Separamos los datos en dos partes, una parte para training (67%) y una parte para test (33%). 
+
+```{r}
+pca_entreno <- pca_completa[1:57,]
+pca_prueba <- pca_completa[58:85,]
+```
+
+## Paso 3 - entrenamiento del modelo sobre los datos
+
+Preparamos la ANN. Empezaremos entrenando una simple MLP feedforward. Vamos a crear dos modelos de red neuronal artificial de una sola capa: un nodo y tres nodos. Antes de utilizar la función `neuralnet()` utilizamos como semilla generadora de los pesos iniciales el valor de `set.seed(1234567)`.
+
+Empezamos con el modelo de 1 nodo en la capa oculta con el argumento `hidden = 1`.
+```{r}
+set.seed(1234567)
+cancer_model <- neuralnet( BASLIK + ERBB + NORM + LUM_BC + LUM_A ~ PC1 +PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = pca_entreno, hidden = 1)
+```
+
+La representamos gráficamente:
+```{r}
+plot(cancer_model)
+```
+
+## Paso 4 - evaluación del funcionamiento del modelo
+
+Usaremos el set de datos de `pca_prueba` para evaluar los resultados del modelo con la función `compute()`
+```{r}
+resultado_modelo <- compute(cancer_model, pca_prueba[1:10])
+# De los dos componentes que retorna la función compute() utilizamos $net.result que almacena los valores previstos
+cancer_prevision <- resultado_modelo$net.result
+```
+
+
+Ahora necesitamos saber cual de las predicciones ha sido la mayor para cada tipo de cáncer y pasar el resultado de numérico a categórico. Vamos a crear una función para hallar el máximo valor de cada predicción y ese será el resultado de la predicción de la clase de cáncer del modelo. Usaremos también la función `apply()` para aplicarla al set de datos `cancer_prevision` al completo.
+
+```{r}
+valormaximo <- function(x) {
+  return(which(x == max(x)))
+}
+
+
+claseReal <- clases[58:85]
+cancertipo <- apply(cancer_prevision, 1, valormaximo)
+pre <- factor(cancertipo,levels=c(1,2,3,4,5),labels=c("BASLIK", "ERBB", "NORM", "LUM_BC", "LUM_A"))
+class <- factor(claseReal,levels=c(1,2,3,4,5),labels=c("BASLIK", "ERBB", "NORM", "LUM_BC", "LUM_A"))
+results <- table(pre,class)
+```
+
+Con la funcion `confusionMatrix()` del paquete `caret`.
+```{r}
+matrizconfu <- confusionMatrix(results)
+matrizconfu
+```
+Vemos los distintos valores estadísticos como la precisión que es de `r round(matrizconfu$overall[1], digits = 2)` y el estadístico $\kappa$ = `r round(matrizconfu$overall[2], digits = 2)`.
+
+
+
+
+
+## Paso 5 - mejora de resultados del modelo
+
+Para mejorar el rendimiento del algoritmo vamos a crear el modelo con tres nodos con el argumento `hidden = 3`. Volvemos a utilizar la semilla para los datos pseudoaleatorios `set.seed(1234567)`.
+```{r}
+set.seed(1234567)
+cancer_model2 <- neuralnet( BASLIK + ERBB + NORM + LUM_BC + LUM_A ~ PC1 +PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = pca_entreno, hidden = 3)
+```
+
+La representamos gráficamente:
+```{r}
+plot(cancer_model2)
+```
+
+
+Evaluamos el modelo como en la red anterior.
+
+```{r}
+resultado_modelo2 <- compute(cancer_model2, pca_prueba[1:10])
+# De los dos componentes que retorna la función compute() utilizamos $net.result que almacena los valores previstos
+cancer_prevision2 <- resultado_modelo2$net.result
+```
+
+
+Obtenemos la matrix de confusión
+```{r}
+cancertipo2 <- apply(cancer_prevision2, 1, valormaximo)
+pre2 <- factor(cancertipo2,levels=c(1,2,3,4,5),labels=c("BASLIK", "ERBB", "NORM", "LUM_BC", "LUM_A"))
+results2 <- table(pre2,class)
+matrizconfu2 <- confusionMatrix(results2)
+matrizconfu2
+```
+
+Podemos observar que la precisión a es de `r round(matrizconfu2$overall[1], digits = 2)` Y el valor $\kappa =$ `r round(matrizconfu2$overall[2], 2)` para el modelo de tres nodos.
+
+## 3-fold crossvalidation
+
+Ahora vamos a usar el paquete `caret` y `nnet()` para realizar un nuevo modelo de 1, 3 y 5 nodos con 3-fold crossvalidation. 
+```{r}
+newpca <- pca_norm
+newpca$clase <- xclases
+```
+
+Para ello creamos un nuevo set de datos compuesto de las `r ncol(newpca) -1` primeras componentes principales y la clase de cáncer de las `r nrow(newpca)` observaciones.
+
+```{r}
+head(newpca)
+```
+
+Seguidamente hacemos el modelo de entrenamiento 3-fold crossvalidation aplicando la semilla pseudoaleatoria.
+
+```{r}
+set.seed(1234567)
+newmodel <- train(clase ~ ., newpca, method='nnet', 
+               trControl= trainControl(method='cv', number=3), 
+               tuneGrid= NULL, tuneLength=3 ,trace = FALSE)
+newmodel
+```
+
+```{r}
+plot(newmodel)
+```
+
+Finalmente podemos ver que el modelo obtenido con el 3-fold crossvalidation de la función `nnet()` con unos valores de `r newmodel$bestTune` número de nodos y decay respectivamente, es mejor que el obtenido con la ANN de 3 nodos de la función `neuralnet()`. Con una precisión de `r newmodel$results[[6,3]]` y un estadístico $\kappa$ = `r newmodel$results[[6,4]]`.
+
+
+
+----
+# Algoritmo Support Vector Machine
+
+Un SMV puede ser imaginado como una superficie que crea un límite entre puntos de datos graficados multidimensionalmente que representan ejemplos y los valores de sus características. La meta de un SVM es crear una separación llamada hiperplano, que divide el espacio para crear particiones homogéneas a cada lado de este creando así grupos diferentes cada uno con características parecidas. Las SVM combinan aspectos de la clasificación por k-NN y de los métodos de regresión, permitiendo el modelado de relaciones altamente complejas.
+
+| **Fortalezas**    | **Debilidades**  | 
+| -----------------------------------|:-----------------------------------|
+| • Se puede usar para problemas de clasificación o predicción numérica  | • Encontrar el mejor modelo requiere probar diferentes  kernels y parámetros del modelo (prueba y error) |
+| • Funciona bastante bien con datos ruidosos y no es muy propenso al overfitting | • Lento de entrenar, sobre todo a medida que aumenta el número de características |
+| • Puede ser más fácil de usar que las redes neuronales, en particular debido a la existencia de varios algoritmos SVM bien soportados  | • Es un modelo de caja negra, estos son muy complejos por lo que difíciles, si no imposibles, de interpretar |
+| • Gana popularidad debido a su alta precisión y ganancias de alto perfil en competiciones de minería de datos
+
+
+
+## Paso 1 - recolección de datos
+
+Los datos se obtienen esta vez de los datos de expresión génica originales. El fichero con la información se llama  data2.csv.
+
+```{r}
+datosorig <- read.csv("data2.csv")
+dim(datosorig)
+```
+
+Los datos originales se componen de `r nrow(datosorig)` observaciones y `r ncol(datosorig)` ya que estos datos no han sido transformados por PCA, sin embargo, nos servirán igual ya que entrenar una SVM es mucho más rápido que una ANN por lo que nos podemos permitir tener muchísimas más características con una capacidad de computo relativamente baja.
+
+Como en la preparación del modelo anterior, también usaremos el set de datos de `class2.csv` que clasifica cada una de las observaciones en un tipo de tumor.
+
+## Paso 2 - exploración y preparación de datos
+
+El primer paso será mezclar las filas con la misma semilla pseudoaleatoria `set.seed(12345)` el set de datos de `data2.csv` y añadir el set de datos de `clase2.csv` como hemos hecho anteriormente, en forma de factor.
+
+```{r}
+datosorig <- datosorig[shuffle,]
+datosorig$clase <- xclases
+```
+
+Para hacernos una idea de la estructura de nuestros datos a modo ilustrativo vamos a ver algunas cifras de las primeras 6 características de nuestro set de datos. Para ello usaremos la función `str()` y `summary()`.
+
+```{r}
+str(datosorig[1:4,1:6])
+summary(datosorig[,1:6])
+```
+
+Las SVM requieren que todas las características sean numéricas y sobre todo que estén escaladas a intervalos pequeños, sin embargo no necesitaremos normalizar los datos ya que el paquete que usaremos se encargará automáticamente de ello.
+
+Ahora pasamos a preparar los sets de entreno y prueba.
+```{r}
+datosorig_entreno <- datosorig[1:57,]
+datosorig_prueba <- datosorig[58:85,]
+```
+
+## Paso 3 - entrenamiento del modelo sobre los datos
+
+
+Usaremos la función `ksvm()` del paquete `kernlab`, previamente instalado y como argumento de `kernel = "vanilladot"` para la función lineal.
+
+```{r}
+set.seed(1234567)
+clasificador_cancer <- ksvm(clase ~ ., data = datosorig_entreno, kernel = "vanilladot")
+clasificador_cancer
+```
+
+## Paso 4 - evaluación del funcionamiento del modelo
+
+Esta información nos dice más bien poco de como clasificará nuestro modelo otros casos del mundo real. Necesitamos examinar su rendimiento con el set de prueba.
+Para ello usaremos la función `predict()` que nos permite hacer predicciones con el set de prueba.
+
+```{r}
+prediccion_cancer <- predict(clasificador_cancer, datosorig_prueba)
+head(prediccion_cancer)
+```
+
+ahora comparamos el tipo de cancer resultado de la predicción del modelo con el verdadero en el set de prueba con la función `table()`.
+
+```{r}
+resultado <- table(prediccion_cancer, datosorig_prueba$clase)
+```
+
+hallamos la matriz de confusión con la función `confusionMatrix()`.
+
+```{r}
+confusionmat <- confusionMatrix(resultado)
+confusionMatrix(resultado)
+```
+
+Hemos obtenido con nuestra matriz de confusión que la precisión del modelo SVM con función lineal es `r round(confusionmat$overall[1], digits = 2)` y el valor del estadístico $\kappa$ = `r round(confusionmat$overall[2], digits = 2)`.
+
+## Paso 5 - mejora de resultados del modelo
+
+Nuestro modelo de SVM usa una función de kernel lineal simple. Podríamos conseguir mapear nuestros datos en un espacio de mayores dimensiones con una función de kernel más compleja y así obtener un mejor ajuste del modelo.
+
+Hay muchas funciones de kernel para usar, pero una convención popular es comenzar con la función Gaussian RBF kernel, así que vamos a ver que resultados obtendríamos si utilizásemos esta función en nuestro modelo.
+
+```{r}
+set.seed(1234567)
+clasificador_cancer2 <- ksvm(clase ~ ., data = datosorig_entreno, kernel = "rbfdot")
+clasificador_cancer2
+```
+
+Evaluamos el rendimiento como hemos hecho anteriormente.
+
+```{r}
+prediccion_cancer2 <- predict(clasificador_cancer2, datosorig_prueba)
+head(prediccion_cancer2)
+```
+
+```{r}
+resultado2 <- table(prediccion_cancer2, datosorig_prueba$clase)
+confusionmat2 <- confusionMatrix(resultado2)
+confusionMatrix(resultado2)
+```
+
+En este caso podemos decir que con el modelo de SVM con la función Gaussian RBF hemos obtenido una precisión de `r round(confusionmat2$overall[1], digits = 2)` y el valor del estadístico $\kappa$ = `r round(confusionmat2$overall[2], digits = 2)`.
+
+## 3-fold crossvalidation
+
+Ahora usaremos de nuevo el paquete `caret` y `svmLinear` para realizar el modelo de SVM con 3-fold crossvalidation. 
+
+```{r}
+set.seed(1234567)
+newmodel2 <- train(clase ~ ., data = datosorig, method='svmLinear', 
+               trControl= trainControl(method='cv', number=3), 
+               tuneGrid= NULL, trace = FALSE)
+newmodel2
+```
+
+Finalmente podemos ver que con el modelo con el 3-fold crossvalidation del paquete `caret` hemos obtenido unos valores de precisión de `r newmodel2$results[2]` y un un estadístico $\kappa$ = `r newmodel2$results[3]`.
+
+## Evaluación y comparación de los resultados
+
+**Modelo de ANN con un nodo**
+
+_Precisión_ = `r round(matrizconfu$overall[1], digits = 2)` / $\kappa$ = `r round(matrizconfu$overall[2], digits = 2)`
+
+**Modelo de ANN con tres nodos**
+
+_Precisión_ = `r round(matrizconfu2$overall[1], digits = 2)` / $\kappa$ = `r round(matrizconfu2$overall[2], 2)`
+
+**Modelo de ANN con 3-fold crossvalidation**
+
+Valores de `r newmodel$bestTune` número de nodos y decay respectivamente.
+
+_Precisión_ de `r round(newmodel$results[[6,3]], digits = 2)` / $\kappa$ = `r round(newmodel$results[[6,4]], digits = 2)`
+
+**Modelo de SVM con función lineal**
+
+_Precisión_ = `r round(confusionmat$overall[1], digits = 2)` / $\kappa$ = `r round(confusionmat$overall[2], digits = 2)`
+
+**Modelo de SVM con función Gaussiana**
+
+_Precisión_ = `r round(confusionmat2$overall[1], digits = 2)` / $\kappa$ = `r round(confusionmat2$overall[2], digits = 2)`
+
+**Modelo de SVM con función lineal con 3-fold crossvalidation**
+
+_Precisión_ = `r round(newmodel2$results[2], digits = 2)` / $\kappa$ = `r round(newmodel2$results[3], digits = 2)`
+
+
+Siendo los valores más altos de entre todos estos los de el modelo SVM con función lineal, sorprendentemente. En favor de las ANN podríamos decir que estas han sido entrenadas con datos sesgados resultados del PCA debido a los grandes tiempos de entreno que hubiésemos necesitado de haberlas entrenado con los archivos de datos originales como lo hemos hecho con las SVM.
+
+
+# Referencias
